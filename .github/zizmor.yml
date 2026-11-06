@@ -1,0 +1,33 @@
+# =============================================================================
+# zizmor configuration (GitHub Actions security scan, ci.yml `actions-scan`)
+# =============================================================================
+# Suppressions for findings we accept, each with a one-line reason. Prefer
+# fixing the workflow over ignoring the finding.
+#
+#   rules:
+#     <audit-id>:
+#       ignore:
+#         - <workflow-file>.yml[:line[:column]]   # <reason>
+#       disable: true                             # whole audit, last resort
+#
+# Audit ids and what each one means: https://docs.zizmor.sh/audits/
+# Config reference:                   https://docs.zizmor.sh/configuration/
+# =============================================================================
+
+rules:
+  artipacked:
+    ignore:
+      # The release job's checkout keeps the token: its last step pushes the
+      # moving v1 tag with `git push`. Nothing in that job runs PR-controlled
+      # code (it only runs on push to main, after every gate passed).
+      - ci.yml:253
+  self-repository:
+    ignore:
+      # `uses: ./` is the documented local-action form; the `$/` spelling
+      # zizmor suggests is not verified against GitHub's docs here.
+      - ci.yml:144
+  superfluous-actions:
+    ignore:
+      # softprops/action-gh-release is SHA-pinned and does the job; swapping it
+      # for `gh release create` is a separate, behaviour-changing change.
+      - ci.yml:287

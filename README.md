@@ -90,9 +90,14 @@ steps:
       dest: dist  # output directory (default: dist)
 ```
 
-The `v1` tag always points at the latest release. Pin a specific
-release with `version: v0.3.1-abc1234` (defaults to `latest`). Works
-on Linux, macOS, and Windows runners, including ARM.
+The `v1` tag always points at the latest release. The binary the
+action runs is the one built from the commit the action is pinned to:
+`@v1`, `@<commit SHA>`, or `@v1.0.24-41d39ae` each resolve to that
+commit's release, so pinning the action pins the binary. Pin a
+different release with `version: v1.0.24-41d39ae`. Every download is
+verified against the release's `checksums.txt`; releases published
+before checksums existed are refused. Works on Linux, macOS, and
+Windows runners, including ARM.
 
 The action reports the release tag it actually downloaded in its
 `version` output:
@@ -106,8 +111,8 @@ The action reports the release tag it actually downloaded in its
 ### Releasing
 
 Every push to `main` publishes a GitHub release with binaries for all
-platforms and moves the `v1` tag to it, so action users are always on
-the latest release. The GitHub Marketplace listing is the one thing
+platforms plus a `checksums.txt`, and moves the `v1` tag to it, so
+action users are always on the latest release. The GitHub Marketplace listing is the one thing
 releases cannot update automatically: GitHub only lists versions that
 were published to the Marketplace by hand (edit the release, tick
 "Publish this Action to the GitHub Marketplace", update). Do that for
