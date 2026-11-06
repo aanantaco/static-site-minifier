@@ -10,8 +10,14 @@ branding:
 inputs:
   version:
     description: >-
-      Release tag to download (for example v0.3.1-abc1234), or "latest"
-      for the newest release.
+      Release tag to download (for example v1.0.24-41d39ae). Leave it as
+      "latest" to run the release built from the same commit as this action:
+      the ref the action is pinned to (a release tag, a commit SHA, the v1 tag
+      or a branch) is mapped to its release, so pinning the action pins the
+      binary. A ref with no release falls back to the pinned default release.
+      Every download is verified against the release's checksums.txt and
+      refused if it cannot be; releases published before checksums.txt existed
+      cannot be used.
     required: false
     default: 'latest'
   src:
@@ -25,7 +31,9 @@ inputs:
 
 outputs:
   version:
-    description: 'The release tag the binary was downloaded from.'
+    description: >-
+      The release tag the binary was downloaded from, or "source" when the
+      action was run from its own checkout (uses: ./) and built the binary.
     value: ${{ steps.download.outputs.version }}
 
 runs:
@@ -36,9 +44,16 @@ runs:
       shell: bash
       env:
         SSM_VERSION: ${{ inputs.version }}
-        GH_TOKEN: ${{ github.token }}
+        ACTION_REF: ${{ github.action_ref }}
+        ACTION_REPOSITORY: ${{ github.action_repository }}
       run: |
         set -euo pipefail
+
+        repo="aanantaco/static-site-minifier"
+        repo_url="https://github.com/${repo}"
+        # Used when the pinned ref cannot be mapped to a release. Bump it to
+        # the newest release that ships checksums.txt.
+        default_version="v1.0.24-41d39ae"
 
         case "$(uname -s)" in
           Linux) os=linux ;;
@@ -55,73 +70,121 @@ runs:
 
         asset="builder-${os}-${arch}"
         if [ "$os" = "windows" ]; then asset="${asset}.exe"; fi
-
-        repo="aanantaco/static-site-minifier"
-        if [ "$SSM_VERSION" = "latest" ]; then
-          # Resolve the "latest" redirect to a concrete release URL so
-          # the tag actually used can be reported as an output. The
-          # release marked "latest" may carry no binaries (for example
-          # a release published on the moving v1 tag): then the probe
-          # fails and we fall back to the newest release that has this
-          # asset.
-          probe="https://github.com/${repo}/releases/latest/download/${asset}.tar.gz"
-          # awk must consume the whole stream: exiting at the first
-          # match breaks the pipe, which pipefail turns into a bogus
-          # probe failure.
-          url=$(curl -fsI --retry 3 --retry-delay 2 "$probe" \
-            | awk 'tolower($1) == "location:" { loc = $2 } END { sub(/\r$/, "", loc); print loc }') || url=""
-          case "$url" in
-            *"/releases/download/"*) ;;
-            *) url="" ;;
-          esac
-          # The redirect is issued even for assets the latest release
-          # does not have, so verify the concrete URL actually exists.
-          if [ -n "$url" ] && ! curl -fsIL --retry 3 --retry-delay 2 "$url" -o /dev/null; then
-            url=""
-          fi
-          if [ -z "$url" ]; then
-            echo "latest release has no ${asset}.tar.gz; checking recent releases"
-            # Authenticate when a token is available: unauthenticated
-            # api.github.com calls from shared Actions runner IPs are
-            # rate limited and fail intermittently with 403.
-            auth=()
-            if [ -n "${GH_TOKEN:-}" ]; then
-              auth=(-H "Authorization: Bearer ${GH_TOKEN}")
-            fi
-            url=$(curl -fsSL --retry 3 --retry-delay 2 "${auth[@]}" \
-              "https://api.github.com/repos/${repo}/releases?per_page=15" \
-              | grep -o "https://github.com/${repo}/releases/download/[^\"]*/${asset}\.tar\.gz" \
-              | head -n 1)
-            if [ -z "$url" ]; then
-              echo "no recent release contains ${asset}.tar.gz" >&2
-              exit 1
-            fi
-          fi
-        else
-          url="https://github.com/${repo}/releases/download/${SSM_VERSION}/${asset}.tar.gz"
-        fi
-
-        resolved="${url%/*}"
-        resolved="${resolved##*/}"
-        echo "Resolved release: ${resolved}"
-        echo "version=${resolved}" >> "$GITHUB_OUTPUT"
+        archive="${asset}.tar.gz"
 
         dir="${RUNNER_TEMP}/static-site-minifier"
         mkdir -p "$dir"
-        echo "Downloading $url"
-        curl -fsSL --retry 3 --retry-delay 2 "$url" -o "$dir/${asset}.tar.gz"
-        tar -xzf "$dir/${asset}.tar.gz" -C "$dir"
-
         bin="$dir/builder"
         if [ "$os" = "windows" ]; then bin="${bin}.exe"; fi
+        echo "bin=${bin}" >> "$GITHUB_OUTPUT"
+
+        # Which release to run.
+        #   version input set      -> that tag, verbatim
+        #   uses: ./ (this repo)   -> no release exists for an unmerged commit;
+        #                             build the checkout itself (next steps)
+        #   release tag ref        -> that tag
+        #   SHA / v1 / branch ref  -> the commit it names, then the release tag
+        #                             ending in that commit's short SHA
+        #   anything else          -> default_version
+        tag=""
+        if [ -n "$SSM_VERSION" ] && [ "$SSM_VERSION" != "latest" ]; then
+          tag="$SSM_VERSION"
+        else
+          ref="${ACTION_REF:-}"
+          if [ -z "$ref" ] || [ -z "${ACTION_REPOSITORY:-}" ]; then
+            echo "Action run from its own checkout; building builder from source." >&2
+            echo "resolved=false" >> "$GITHUB_OUTPUT"
+            echo "version=source" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{7}$ ]]; then
+            tag="$ref"
+          else
+            sha=""
+            if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+              sha="$ref"
+            elif command -v git >/dev/null 2>&1; then
+              refs="$(git ls-remote "$repo_url" "refs/tags/${ref}^{}" "refs/tags/${ref}" "refs/heads/${ref}" 2>/dev/null || true)"
+              # Prefer the peeled commit of an annotated tag.
+              sha="$(printf '%s\n' "$refs" | awk '$2 ~ /\^\{\}$/ { print $1; exit }')"
+              if [ -z "$sha" ]; then
+                sha="$(printf '%s\n' "$refs" | awk 'NF { print $1; exit }')"
+              fi
+            fi
+            if [[ "$sha" =~ ^[0-9a-f]{40}$ ]] && command -v git >/dev/null 2>&1; then
+              short="${sha:0:7}"
+              tag="$(git ls-remote --tags "$repo_url" "refs/tags/v*-${short}" 2>/dev/null \
+                | awk '$2 !~ /\^\{\}$/ { sub("refs/tags/", "", $2); print $2 }' \
+                | sort -V | tail -n 1 || true)"
+            fi
+            if [ -z "$tag" ]; then
+              echo "Action ref '${ref}' has no matching release; using ${default_version}." >&2
+              tag="$default_version"
+            fi
+          fi
+        fi
+
+        if ! [[ "$tag" =~ ^v[0-9A-Za-z._-]+$ ]]; then
+          echo "invalid release tag: ${tag}" >&2
+          exit 1
+        fi
+
+        base="${repo_url}/releases/download/${tag}"
+        echo "Resolved release: ${tag}"
+        echo "version=${tag}" >> "$GITHUB_OUTPUT"
+
+        echo "Downloading ${base}/${archive}"
+        curl -fsSL --retry 3 --retry-delay 2 -o "$dir/${archive}" "${base}/${archive}"
+
+        # Verify against the release's checksums.txt. Every arm is fatal: a
+        # missing checksums file, a missing asset line, no sha256 tool or a
+        # mismatch stops the job instead of running an unverified binary.
+        if ! curl -fsSL --retry 3 --retry-delay 2 -o "$dir/checksums.txt" "${base}/checksums.txt"; then
+          echo "::error::Release ${tag} has no checksums.txt; refusing to run an unverified binary." >&2
+          exit 1
+        fi
+        line="$(grep " ${archive}\$" "$dir/checksums.txt" || true)"
+        if [ -z "$line" ]; then
+          echo "::error::${archive} is not listed in checksums.txt for release ${tag}." >&2
+          exit 1
+        fi
+        if command -v sha256sum >/dev/null 2>&1; then
+          ( cd "$dir" && printf '%s\n' "$line" | sha256sum -c - )
+        elif command -v shasum >/dev/null 2>&1; then
+          ( cd "$dir" && printf '%s\n' "$line" | shasum -a 256 -c - )
+        else
+          echo "::error::Neither sha256sum nor shasum is available; cannot verify ${archive}." >&2
+          exit 1
+        fi
+
+        tar -xzf "$dir/${archive}" -C "$dir"
         mv "$dir/${asset}" "$bin"
         chmod +x "$bin"
-        echo "SSM_BIN=$bin" >> "$GITHUB_ENV"
         "$bin" version
+        echo "resolved=true" >> "$GITHUB_OUTPUT"
+
+    - name: Set up Go (build from source)
+      if: steps.download.outputs.resolved != 'true'
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: ${{ github.action_path }}/go.mod
+        cache: false
+
+    - name: Build builder (build from source)
+      if: steps.download.outputs.resolved != 'true'
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        SSM_BIN: ${{ steps.download.outputs.bin }}
+      run: |
+        set -euo pipefail
+        CGO_ENABLED=0 go build -buildvcs=false -o "$SSM_BIN" ./cmd/builder
+        "$SSM_BIN" version
 
     - name: Minify site
       shell: bash
       env:
+        SSM_BIN: ${{ steps.download.outputs.bin }}
         SRC_DIR: ${{ inputs.src }}
         DEST_DIR: ${{ inputs.dest }}
       run: '"$SSM_BIN" build'
