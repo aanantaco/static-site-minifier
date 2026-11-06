@@ -113,8 +113,9 @@ The action reports the release tag it actually downloaded in its
 Every push to `main` publishes a GitHub release with binaries for all
 platforms plus a `checksums.txt`, and moves the `v1` tag to it, so
 action users are always on the latest release. The GitHub Marketplace
-listing is the one thing releases cannot update automatically: GitHub only lists versions that
-were published to the Marketplace by hand (edit the release, tick
+listing is the one thing releases cannot update automatically: GitHub
+only lists versions that were published to the Marketplace by hand (edit
+the release, tick
 "Publish this Action to the GitHub Marketplace", update). Do that for
 milestone releases; the moving `v1` tag keeps users on current code
 either way.
