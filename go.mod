@@ -2,7 +2,7 @@ module github.com/aanantaco/static-site-minifier
 
 go 1.26.0
 
-toolchain go1.26.5
+toolchain go1.26.10
 
 require (
 	github.com/caarlos0/env/v11 v11.4.1
